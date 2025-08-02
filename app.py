@@ -1,125 +1,137 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, session
-from werkzeug.security import generate_password_hash, check_password_hash
-import json
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
 import os
+import json
 import requests
 
 app = Flask(__name__)
-app.secret_key = "supersecretkey"
-
-SUBMISSIONS_FILE = "submissions.json"
+app.secret_key = "your_secret_key"  # Change this in production
+WEBHOOK_URL = "https://discord.com/api/webhooks/..."  # Replace with your webhook URL
+DATA_FILE = "submissions.json"
 USERS_FILE = "users.json"
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1401117057214447616/FxXRgqJIDxhR0-lvHFYDZEGylh7Cs4az3pW5mpXrrEzl0A8ylai0_4kKSnWelcCn1Io1"
 
-# --- Helper functions ---
-
-def load_json(file_path):
-    if not os.path.exists(file_path):
-        return []
-    with open(file_path, "r", encoding="utf-8") as f:
+# Load + Save Utilities
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return {}
+    with open(USERS_FILE, "r") as f:
         return json.load(f)
 
-def save_json(file_path, data):
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f, indent=4)
 
-# --- Routes ---
+def load_submissions():
+    if not os.path.exists(DATA_FILE):
+        return []
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
 
+def save_submissions(submissions):
+    with open(DATA_FILE, "w") as f:
+        json.dump(submissions, f, indent=4)
+
+# Routes
 @app.route("/")
-def home():
+def index():
+    submissions = load_submissions()
+    return render_template("index.html", submissions=submissions, username=session.get("username"))
+
+@app.route("/submit", methods=["POST"])
+def submit():
     if "username" not in session:
         return redirect(url_for("login"))
-    return render_template("index.html", username=session["username"])
 
-@app.route("/", methods=["POST"])
-def submit_idea():
-    if "username" not in session:
-        flash("Please log in to submit ideas.", "error")
-        return redirect(url_for("login"))
-
-    title = request.form.get("title", "").strip()
-    description = request.form.get("description", "").strip()
-    username = session["username"]
-
-    if not title or not description:
-        flash("Both title and description are required.", "error")
-        return redirect(url_for("home"))
-
-    submissions = load_json(SUBMISSIONS_FILE)
-    submissions.append({
-        "username": username,
-        "title": title,
-        "description": description
-    })
-    save_json(SUBMISSIONS_FILE, submissions)
+    submissions = load_submissions()
+    data = request.form
+    new_id = max([s["id"] for s in submissions], default=0) + 1
+    new_submission = {
+        "id": new_id,
+        "title": data.get("title"),
+        "description": data.get("description"),
+        "username": session["username"],
+        "votes": {"upvotes": 0, "downvotes": 0},
+        "comments": []
+    }
+    submissions.append(new_submission)
+    save_submissions(submissions)
 
     # Send to Discord
-    message = f"📹 **New Video Idea by @{username}**\n**Title:** {title}\n**Description:** {description}"
-    try:
-        response = requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
-        if response.status_code != 204:
-            print("Discord error:", response.text)
-    except Exception as e:
-        print("Discord send failed:", e)
+    message = f"**New Idea by {session['username']}**\n**Title:** {new_submission['title']}\n**Description:** {new_submission['description']}"
+    requests.post(WEBHOOK_URL, json={"content": message})
 
-    flash("Idea submitted successfully!", "success")
-    return redirect(url_for("home"))
+    return redirect(url_for("index"))
 
-@app.route("/submissions")
-def submissions():
-    if "username" not in session:
-        return redirect(url_for("login"))
-    ideas = load_json(SUBMISSIONS_FILE)
-    return render_template("submissions.html", submissions=ideas)
+@app.route("/vote/<int:id>/<action>", methods=["POST"])
+def vote(id, action):
+    submissions = load_submissions()
+    submission = next((s for s in submissions if s["id"] == id), None)
+    if not submission:
+        return jsonify({"error": "Idea not found"}), 404
 
-@app.route("/signup", methods=["GET", "POST"])
-def signup():
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "").strip()
+    if action == "upvote":
+        submission["votes"]["upvotes"] += 1
+    elif action == "downvote":
+        submission["votes"]["downvotes"] += 1
+    else:
+        return jsonify({"error": "Invalid action"}), 400
 
-        if not username or not password:
-            flash("Username and password required.", "error")
-            return redirect(url_for("signup"))
+    save_submissions(submissions)
+    return jsonify(submission)
 
-        users = load_json(USERS_FILE)
-        if any(user["username"].lower() == username.lower() for user in users):
-            flash("Username already exists.", "error")
-            return redirect(url_for("signup"))
+@app.route("/comment/<int:id>", methods=["POST"])
+def comment(id):
+    submissions = load_submissions()
+    submission = next((s for s in submissions if s["id"] == id), None)
+    if not submission:
+        return jsonify({"error": "Idea not found"}), 404
 
-        hashed_pw = generate_password_hash(password)
-        users.append({"username": username, "password": hashed_pw})
-        save_json(USERS_FILE, users)
+    data = request.json
+    user = data.get("user")
+    comment_text = data.get("comment")
 
-        flash("Account created. Please log in.", "success")
-        return redirect(url_for("login"))
+    if not user or not comment_text:
+        return jsonify({"error": "User and comment are required"}), 400
 
-    return render_template("signup.html")
+    submission["comments"].append({"user": user, "text": comment_text})
+    save_submissions(submissions)
+    return jsonify(submission)
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "").strip()
+        users = load_users()
+        username = request.form["username"]
+        password = request.form["password"]
 
-        users = load_json(USERS_FILE)
-        user = next((u for u in users if u["username"].lower() == username.lower()), None)
-
-        if user and check_password_hash(user["password"], password):
-            session["username"] = user["username"]
-            flash("Logged in successfully!", "success")
-            return redirect(url_for("home"))
+        if username in users and users[username] == password:
+            session["username"] = username
+            return redirect(url_for("index"))
         else:
-            flash("Invalid credentials.", "error")
-            return redirect(url_for("login"))
+            return render_template("login.html", error="Invalid credentials")
 
     return render_template("login.html")
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    if request.method == "POST":
+        users = load_users()
+        username = request.form["username"]
+        password = request.form["password"]
+
+        if username in users:
+            return render_template("signup.html", error="Username already exists")
+
+        users[username] = password
+        save_users(users)
+        session["username"] = username
+        return redirect(url_for("index"))
+
+    return render_template("signup.html")
 
 @app.route("/logout")
 def logout():
     session.pop("username", None)
-    flash("Logged out.", "success")
-    return redirect(url_for("login"))
+    return redirect(url_for("index"))
 
 if __name__ == "__main__":
     app.run(debug=True)
