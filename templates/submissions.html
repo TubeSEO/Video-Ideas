@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>All Submissions</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>All Video Ideas</h1>
+        <a class="nav" href="{{ url_for('home') }}">Submit New Idea</a> |
+        <a class="nav" href="{{ url_for('logout') }}">Logout</a>
+
+        {% if submissions %}
+            <ul class="submission-list">
+                {% for idea in submissions %}
+                    <li>
+                        <strong>@{{ idea.username }}</strong><br>
+                        <strong>{{ idea.title }}</strong><br>
+                        <p>{{ idea.description }}</p>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>No submissions yet.</p>
+        {% endif %}
+    </div>
+</body>
+</html>
